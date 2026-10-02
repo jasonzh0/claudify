@@ -56,79 +56,57 @@ export const coverFromOutput = (url: string, stdout: string): Cover | undefined 
   return { url, size: image.width, pixels: image.pixels }
 }
 
-// Averages the cover's pixels over the cell [x0, x1) × [y0, y1) of a size×size grid.
+const rgb = (p: number) => [(p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff] as const
+const pack = (r: number, g: number, b: number) => ((Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b)) >>> 0
+
+// The average color of some pixels.
+const average = (pixels: number[]) => {
+  const sum = [0, 0, 0]
+  for (const p of pixels) rgb(p).forEach((v, i) => (sum[i]! += v))
+  const n = Math.max(1, pixels.length)
+  return sum.map(v => v / n) as [number, number, number]
+}
+
+// The cover's color over cell (x, y) of a size×size grid laid over it.
 const sample = (cover: Cover, size: number, x: number, y: number) => {
   const scale = cover.size / size
-  const x0 = Math.floor(x * scale)
-  const y0 = Math.floor(y * scale)
-  const x1 = Math.max(x0 + 1, Math.floor((x + 1) * scale))
-  const y1 = Math.max(y0 + 1, Math.floor((y + 1) * scale))
-  let r = 0
-  let g = 0
-  let b = 0
-  let n = 0
-  for (let yy = y0; yy < y1; yy++) {
-    for (let xx = x0; xx < x1; xx++) {
-      const p = cover.pixels[yy * cover.size + xx] ?? 0
-      r += (p >> 16) & 0xff
-      g += (p >> 8) & 0xff
-      b += p & 0xff
-      n++
-    }
-  }
-  return ((Math.round(r / n) << 16) | (Math.round(g / n) << 8) | Math.round(b / n)) >>> 0
+  const [x0, y0] = [Math.floor(x * scale), Math.floor(y * scale)]
+  const [x1, y1] = [Math.max(x0 + 1, Math.floor((x + 1) * scale)), Math.max(y0 + 1, Math.floor((y + 1) * scale))]
+  const pixels: number[] = []
+  for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) pixels.push(cover.pixels[yy * cover.size + xx] ?? 0)
+  return pack(...average(pixels))
 }
 
 // Raster cells for a cover `columns` wide: each cell an upper half block, its
 // foreground the top pixel and its background the bottom one.
 export const coverCells = (cover: Cover, columns: number) => {
-  const rows = columns / 2
-  const words = new Uint32Array(columns * rows * 3)
-  for (let row = 0; row < rows; row++) {
-    for (let x = 0; x < columns; x++) {
-      const at = (row * columns + x) * 3
-      words[at] = 0x2580
-      words[at + 1] = sample(cover, columns, x, row * 2)
-      words[at + 2] = sample(cover, columns, x, row * 2 + 1)
-    }
+  const words: number[] = []
+  for (let row = 0; row < columns / 2; row++) {
+    for (let x = 0; x < columns; x++) words.push(0x2580, sample(cover, columns, x, row * 2), sample(cover, columns, x, row * 2 + 1))
   }
-  return encodeBase64(new Uint8Array(words.buffer))
+  return encodeBase64(new Uint8Array(Uint32Array.from(words).buffer))
 }
 
 // The cover as ASCII art, one character per cell, for surfaces without Raster.
 export const coverAscii = (cover: Cover, columns: number) => {
   const ramp = ' .:-=+*#%@'
-  const rows = columns / 2
-  const lines: string[] = []
-  for (let row = 0; row < rows; row++) {
-    let line = ''
-    for (let x = 0; x < columns; x++) {
-      // A cell is twice as tall as wide: average its two pixel rows.
-      const a = sample(cover, columns, x, row * 2)
-      const b = sample(cover, columns, x, row * 2 + 1)
-      const luma = (p: number) => 0.2126 * ((p >> 16) & 0xff) + 0.7152 * ((p >> 8) & 0xff) + 0.0722 * (p & 0xff)
-      const level = (luma(a) + luma(b)) / 2 / 256
-      line += ramp[Math.min(ramp.length - 1, Math.floor(level * ramp.length))]
-    }
-    lines.push(line)
+  const luma = (p: number) => {
+    const [r, g, b] = rgb(p)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 256
   }
-  return lines
+  return Array.from({ length: columns / 2 }, (_, row) =>
+    Array.from({ length: columns }, (_, x) => {
+      // A cell is two pixels tall: average their brightness.
+      const level = (luma(sample(cover, columns, x, row * 2)) + luma(sample(cover, columns, x, row * 2 + 1))) / 2
+      return ramp[Math.min(ramp.length - 1, Math.floor(level * ramp.length))]
+    }).join(''),
+  )
 }
 
 // A dark shade of the cover's average color, for a background that keeps the
-// sidebar's text readable: the hue kept, the brightness brought down to ~20%.
+// sidebar's text readable: the hue kept, the brightest channel brought to 52.
 export const coverTint = (cover: Cover) => {
-  let r = 0
-  let g = 0
-  let b = 0
-  for (const p of cover.pixels) {
-    r += (p >> 16) & 0xff
-    g += (p >> 8) & 0xff
-    b += p & 0xff
-  }
-  const n = Math.max(1, cover.pixels.length)
-  ;[r, g, b] = [r / n, g / n, b / n]
-  const scale = 52 / Math.max(1, r, g, b)
-  const hex = (v: number) => Math.round(Math.min(255, v * scale)).toString(16).padStart(2, '0')
-  return `#${hex(r)}${hex(g)}${hex(b)}`
+  const color = average(cover.pixels)
+  const scale = 52 / Math.max(1, ...color)
+  return `#${pack(...(color.map(v => Math.min(255, v * scale)) as [number, number, number])).toString(16).padStart(6, '0')}`
 }
