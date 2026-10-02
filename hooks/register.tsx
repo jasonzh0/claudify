@@ -53,12 +53,28 @@ type $ = EngineInterface
 type Tokens = { access: string; refresh: string; expiresAt: number }
 type ApiResult = { status: number; json: any }
 
+// The claudify Spotify app. PKCE needs no secret, so a Client ID is safe to
+// ship; Spotify lets an app in development mode serve the 25 users its owner
+// adds in the dashboard, so anyone else brings their own with /spotify setup.
+const DEFAULT_CLIENT_ID = '82881264abd946b889b4d5bca7d72446'
+
+const clientIdOf = async ($: $) => ((await $.store.get('clientId')) as string | undefined) ?? DEFAULT_CLIENT_ID
+
 const SETUP_HELP = [
-  'Spotify is not set up yet. One-time setup (about a minute):',
+  'Use your own Spotify app (about a minute, no user limit):',
   '  1. Open https://developer.spotify.com/dashboard and create an app.',
   `  2. Add the Redirect URI ${REDIRECT_URI} and tick "Web API".`,
   '  3. Copy the app\'s Client ID and run: /spotify setup <client-id>',
   '  4. Run /spotify login',
+  'To go back to the built-in app: /spotify setup default',
+].join('\n')
+
+const NOT_REGISTERED = [
+  'Spotify refused this account for the built-in claudify app: while it is in',
+  'development mode Spotify only lets accounts its owner has added use it.',
+  'Ask the owner to add your Spotify email, or use your own app:',
+  '',
+  SETUP_HELP,
 ].join('\n')
 
 const USAGE = [
@@ -136,9 +152,9 @@ const saveTokens = async ($: $, json: any, previousRefresh?: string) => {
 }
 
 const exchangeCode = async ($: $, code: string) => {
-  const clientId = (await $.store.get('clientId')) as string | undefined
+  const clientId = await clientIdOf($)
   const verifier = (await $.store.get('verifier')) as string | undefined
-  if (!clientId || !verifier) return 'No login in progress. Run /spotify login first.'
+  if (!verifier) return 'No login in progress. Run /spotify login first.'
 
   const res = await $.http.fetch('https://accounts.spotify.com/api/token', {
     method: 'POST',
@@ -158,6 +174,14 @@ const exchangeCode = async ($: $, code: string) => {
   await saveTokens($, json)
   await $.store.delete('verifier')
   await $.store.delete('authState')
+  // A development-mode app logs in any account but serves only the ones its
+  // owner added, so ask once now rather than fail quietly on every poll.
+  const me = await api($, 'GET', '/me')
+  if (isNotRegistered(me)) {
+    await $.store.delete('tokens')
+    await update($, isConnected, () => false)
+    return NOT_REGISTERED
+  }
   void poll($).catch(() => {})
   return undefined
 }
@@ -214,11 +238,11 @@ const getAccessToken = async ($: $, force = false): Promise<string | undefined> 
   if (!tokens) return undefined
   if (!force && tokens.expiresAt - 60000 > (await $.clock.now())) return tokens.access
 
-  const clientId = (await $.store.get('clientId')) as string | undefined
+  const clientId = await clientIdOf($)
   const res = await $.http.fetch('https://accounts.spotify.com/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form({ grant_type: 'refresh_token', refresh_token: tokens.refresh, client_id: clientId ?? '' }),
+    body: form({ grant_type: 'refresh_token', refresh_token: tokens.refresh, client_id: clientId }),
   })
   const json = parseJson(res.text)
   if (!res.ok || !json?.access_token) {
@@ -259,7 +283,10 @@ const api = async ($: $, method: string, path: string, body?: unknown): Promise<
   return { status: 401, json: { error: { message: 'Spotify session expired. Run /spotify login.' } } }
 }
 
+const isNotRegistered = (r: ApiResult) => r.status === 403 && /registered/i.test(r.json?.error?.message ?? '')
+
 const explain = (r: ApiResult) => {
+  if (isNotRegistered(r)) return NOT_REGISTERED
   const reason = r.json?.error?.reason
   if (reason === 'PREMIUM_REQUIRED' || r.status === 403) {
     return 'Spotify only allows playback control for Premium accounts.'
@@ -272,11 +299,16 @@ const explain = (r: ApiResult) => {
 
 // ---------- playback ----------
 
+// Whether a poll has seen Spotify's state since the module loaded: what was
+// already playing then does not open the sidebar, music starting later does.
+let hasPolled = false
+
 const poll = async ($: $) => {
   if (!(await $.store.get('tokens'))) return
   const r = await api($, 'GET', '/me/player?additional_types=episode')
   if (r.status === 204 || (r.status === 200 && !r.json?.item)) {
     await update($, now, () => null)
+    hasPolled = true
     return
   }
   if (r.status !== 200) return
@@ -305,7 +337,8 @@ const poll = async ($: $) => {
     void refreshCover($, state).catch(() => {})
   }
   // Music starting anywhere (the Spotify app, a phone) brings the sidebar up.
-  if (state.isPlaying && !previous?.isPlaying) void openPlayer($).catch(() => {})
+  if (hasPolled && state.isPlaying && !previous?.isPlaying) void openPlayer($).catch(() => {})
+  hasPolled = true
 }
 
 const fetchCover = async ($: $, url: string) => {
@@ -439,13 +472,20 @@ const openPlayer = ($: $) => $.ui.open({ id: PANE, title: 'Spotify', columns: 36
 const run = async ($: $, action: string, arg: string): Promise<string> => {
   if (action === 'setup') {
     if (!arg) return SETUP_HELP
-    await $.store.set('clientId', arg.trim())
-    return 'Client ID saved. Now run /spotify login'
+    if (arg.trim() === 'default') {
+      await $.store.delete('clientId')
+    } else {
+      await $.store.set('clientId', arg.trim())
+    }
+    // Tokens belong to the app that issued them.
+    await $.store.delete('tokens')
+    await update($, isConnected, () => false)
+    await update($, now, () => null)
+    return `${arg.trim() === 'default' ? 'Using the built-in app' : 'Client ID saved'}. Now run /spotify login`
   }
   if (action === 'help') return USAGE
   if (action === 'login') {
-    const clientId = (await $.store.get('clientId')) as string | undefined
-    if (!clientId) return SETUP_HELP
+    const clientId = await clientIdOf($)
     const verifier = randomString(64)
     const state = randomString(16)
     await $.store.set('verifier', verifier)
@@ -481,7 +521,7 @@ const run = async ($: $, action: string, arg: string): Promise<string> => {
   }
 
   if (!(await $.store.get('tokens'))) {
-    return (await $.store.get('clientId')) ? 'Not connected. Run /spotify login' : SETUP_HELP
+    return 'Not connected. Run /spotify login'
   }
 
   switch (action) {
@@ -599,8 +639,6 @@ export const register: Register = on => {
     if (await $.store.get('tokens')) {
       await update($, isConnected, () => true)
       void poll($).catch(() => {})
-      // Unasked, the surface seats it only where it fits as a sidebar.
-      void openPlayer($).catch(() => {})
     }
     $.clock.every(POLL_MS, () => void poll($).catch(() => {}))
     // Moves the progress bars along between polls.
@@ -621,6 +659,63 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__claudify__spotify' }, async ($, e) => {
     const input = e as unknown as { action?: string; query?: string }
     return { result: await run($, input.action ?? 'now', input.query ?? '') }
+  })
+
+  // The bar above the prompt shows only while the sidebar is not on screen,
+  // so opening or closing the sidebar redraws it.
+  on('ui.open', async ($, e, next) => {
+    const opened = await next(e)
+    $.ui.invalidate('ui.render')
+    return opened
+  })
+
+  on('ui.close', async ($, e, next) => {
+    const closed = await next(e)
+    $.ui.invalidate('ui.render')
+    return closed
+  })
+
+  // The bar above the prompt, for when the sidebar is closed: one compact row
+  // on the left, a blank row keeping it off the transcript.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const playing = await read($, now)
+    if (e.props.hasSurvey || !playing) return next(e)
+    const panes = await $.ui.panes()
+    if (panes.some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)) return next(e)
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const columns = Math.max(20, e.props.bodyColumns ?? e.viewport?.columns ?? 80)
+    const progress = progressAt(playing, await $.clock.now())
+    const barWidth = Math.max(0, Math.min(20, columns - 90))
+
+    return (
+      <Box marginTop={1} gap={2}>
+        <Box flexShrink={1}>
+          <Text color="green">♫ </Text>
+          <Text bold wrap="truncate-end">
+            {playing.title}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {' '}— {playing.artist}
+          </Text>
+        </Box>
+        <Text dimColor>
+          {barWidth > 4 ? `${progressBar(progress, playing.durationMs, barWidth)} ` : ''}
+          {clock(progress)}/{clock(playing.durationMs)}
+        </Text>
+        <Box gap={1} flexShrink={0}>
+          <Button key="prev" label="⏮" onPress={() => act($, () => control($, 'POST', '/me/player/previous'))} />
+          <Button
+            key="toggle"
+            label={playing.isPlaying ? '⏸' : '▶'}
+            variant="primary"
+            onPress={() => act($, () => toggle($))}
+          />
+          <Button key="next" label="⏭" onPress={() => act($, () => control($, 'POST', '/me/player/next'))} />
+          <Button key="open" label="☰" onPress={() => void openPlayer($).catch(() => {})} />
+        </Box>
+      </Box>
+    )
   })
 
   // The sidebar: cover art, track, progress, transport, volume, device, queue.

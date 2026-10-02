@@ -1,0 +1,13 @@
+{
+  "name": "claudify",
+  "owner": { "name": "jasonzh0" },
+  "metadata": { "description": "Spotify player for Claude Code" },
+  "plugins": [
+    {
+      "name": "claudify",
+      "source": "./",
+      "description": "Spotify in Claude Code: a player sidebar with cover art, playback and volume controls, and /spotify commands Claude can use too.",
+      "version": "0.1.0"
+    }
+  ]
+}

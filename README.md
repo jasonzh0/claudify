@@ -16,22 +16,40 @@ Playback control needs Spotify Premium; cover art uses macOS's `sips`.
 
 ## Install
 
-Claude Code loads it from a plugin folder. Add this to the `env` block of
-`~/.claude/settings.json`:
+In a terminal:
 
-```json
-"CLAUDE_CODE_PLUGIN_DIRS": "/path/to/claudify"
+```
+claude plugin marketplace add jasonzh0/claudify
+claude plugin install claudify@claudify
 ```
 
-or run `claude --plugin-dir /path/to/claudify`.
+or inside Claude Code: `/plugin marketplace add jasonzh0/claudify`, then
+`/plugin install claudify@claudify`. Restart Claude Code to load it.
 
-## Connect Spotify (one time)
+## Log in
+
+```
+/spotify login
+```
+
+Your browser opens Spotify's consent page; approve it and you're connected.
+
+The built-in claudify Spotify app is in Spotify's development mode, which only
+serves accounts its owner has added (up to 25). If Spotify refuses your account,
+ask to be added, or use your own app (about a minute, no limit):
 
 1. Create an app at https://developer.spotify.com/dashboard
 2. Add the Redirect URI `http://127.0.0.1:8888/callback` and tick "Web API"
-3. In Claude Code: `/spotify setup <client-id>`, then `/spotify login`
+3. `/spotify setup <client-id>`, then `/spotify login`
 
-No client secret is needed (Authorization Code with PKCE).
+No client secret is involved anywhere (Authorization Code with PKCE); tokens
+stay in Claude Code's plugin storage on your machine.
+
+## Develop
+
+Load a checkout instead of the installed copy with
+`claude --plugin-dir /path/to/claudify`, or set `CLAUDE_CODE_PLUGIN_DIRS` in the
+`env` block of `~/.claude/settings.json`.
 
 ## Commands
 
@@ -44,9 +62,10 @@ No client secret is needed (Authorization Code with PKCE).
 /spotify shuffle on|off | repeat off|context|track
 /spotify bg terminal|none|album|#rrggbb
 /spotify devices | now | close | logout | help
+/spotify setup <client-id> | setup default
 ```
 
-## Develop
+## Test
 
 ```
 claude plugin validate .
