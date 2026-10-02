@@ -1,0 +1,6 @@
+{
+  "name": "claudify",
+  "version": "0.1.0",
+  "description": "Spotify in Claude Code: connect your account, see what's playing above the prompt, and control playback with /spotify or by asking Claude.",
+  "types": "./types/index.d.ts"
+}
